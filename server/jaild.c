@@ -514,6 +514,19 @@ static void print_usage(const char *argv, int error)
 
     fprintf(fp, "%s -h\n", argv);
     fprintf(fp, "%s -v\n", argv);
+    fprintf(fp, "\n");
+    fprintf(fp, "  -a  change socket prefix (default jaild).\n");
+    fprintf(fp, "      socket is named as /tmp/<prefix>-<uid>-<gid>.sock in the host.\n");
+    fprintf(fp, "  -u  set UID of the container.\n");
+    fprintf(fp, "  -g  set GID of the container, if absent, UID is used.\n");
+    fprintf(fp, "  -n  override username, don't read container /etc/passwd.\n");
+    fprintf(fp, "  -r  chroot to the given path.\n");
+    fprintf(fp, "  -s  override shell, don't read container /etc/passwd.\n");
+    fprintf(fp, "      it's required if you don't chroot and the user has a shell of\n");
+    fprintf(fp, "      jail, or an infinite loop will occur.\n");
+    fprintf(fp, "  -m  bind mount host path into container.\n");
+    fprintf(fp, "      typically used with chroot, you can use -m /mnt=/opt to map host\n");
+    fprintf(fp, "      /opt to guest /mnt, can be specified multiple times.\n");
 }
 
 static void print_version(void)
