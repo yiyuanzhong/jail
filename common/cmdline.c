@@ -1,19 +1,33 @@
+/* Copyright 2014 yiyuanzhong@gmail.com (Yiyuan Zhong)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include "cmdline.h"
 
 #include <assert.h>
 #include <errno.h>
-
-#if defined(WIN32)
-# include <Windows.h>
-#elif __unix__
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define MAX_PREFIX_LENGTH 20
+#define MAX_STATIC_BUFFER 65536
 
 extern char **environ;
 
@@ -22,14 +36,8 @@ static size_t g_prefix_length           = 0;
 static char   g_prefix[MAX_PREFIX_LENGTH]  ;
 
 static       char *g_arg_name        = NULL;
-#endif /* __unix__ */
-
-#define MAX_STATIC_BUFFER 65536
 
 static const char *g_module_arg      = NULL;
-static const char *g_module_path     = NULL;
-static const char *g_module_dirname  = NULL;
-static const char *g_module_basename = NULL;
 
 static void *cmdline_malloc(size_t size)
 {
@@ -66,201 +74,19 @@ static char *cmdline_strdup(const char *str)
     return ret;
 }
 
-#if defined(WIN32)
-char **cmdline_setup(int argc, char *argv[])
-{
-    char filename[MAX_PATH * 4];
-    wchar_t buffer[MAX_PATH];
-    char *pos;
-    DWORD ret;
-    DWORD i;
-    int len;
-
-    if (argc <= 0 || !argv || !*argv) {
-        return NULL;
-    }
-
-    ret = GetModuleFileNameW(NULL, buffer, MAX_PATH);
-    if (ret == 0 || ret == MAX_PATH) {
-        return NULL;
-    }
-
-    len = WideCharToMultiByte(CP_UTF8, 0, buffer, ret, filename, sizeof(filename), NULL, NULL);
-    if (len <= 0 || len >= sizeof(filename)) {
-        return NULL;
-    }
-    filename[len] = '\0';
-
-    for (i = 0; i < ret; ++i) {
-        if (filename[i] == '\\') {
-            filename[i] = '/';
-        }
-    }
-
-    g_module_arg = cmdline_strdup(argv[0]);
-    g_module_path = cmdline_strdup(filename);
-
-    pos = strrchr(filename, '/');
-    if (!pos) {
-        g_module_basename = cmdline_strdup(filename);
-        g_module_dirname = cmdline_strdup(".");
-    } else {
-        g_module_basename = cmdline_strdup(pos + 1);
-        *pos = '\0';
-        g_module_dirname = cmdline_strdup(filename);
-    }
-
-    return argv;
-}
-
-int cmdline_set_process_name(const char *fmt, ...)
-{
-    /* NOP */
-    return 0;
-}
-#elif __unix__
-/* Both dirname and basename are retrieved. */
-static int cmdline_get_module_path_via_exe(void)
-{
-    char buffer[PATH_MAX];
-    char path[128];
-    int ret;
-
-    if (g_module_dirname && g_module_basename) {
-        return 0;
-    }
-
-    snprintf(path, sizeof(path), "/proc/%d/exe", getpid());
-    ret = readlink(path, buffer, sizeof(buffer));
-    if (ret <= 0) {
-        return -1;
-    }
-
-    buffer[ret] = '\0';
-    g_module_dirname = cmdline_strdup(dirname(cmdline_strdup(buffer)));
-    g_module_basename = cmdline_strdup(basename(cmdline_strdup(buffer)));
-    return 0;
-}
-
-/* Only basename are retrieved. */
-static int cmdline_get_module_path_via_stat(const char *argv)
-{
-    char buffer[NAME_MAX];
-    char *argv_name;
-    size_t len;
-    FILE *file;
-    int ret;
-
-    if (g_module_basename) {
-        return 0;
-    }
-
-    /* In case of ARGV[0] been modified, read module name directly from PROCFS. */
-    file = fopen("/proc/self/stat", "r");
-    if (!file) {
-        return -1;
-    }
-
-    ret = fscanf(file, "%*d (%15[^)]", buffer);
-    fclose(file);
-    if (ret != 1) {
-        return -1;
-    }
-
-    len = strlen(buffer);
-    if (!len) {
-        return -1;
-    }
-
-    argv_name = basename(cmdline_strdup(argv));
-
-    /* Looks like a truncation, proceed with argv. */
-    if (len == 15 && strstr(argv_name, buffer) == argv_name) {
-        g_module_basename = cmdline_strdup(argv_name);
-    } else {
-        g_module_basename = cmdline_strdup(buffer);
-    }
-
-    return 0;
-}
-
-/* Only dirname is retrieved. */
-static int cmdline_get_module_path_via_fd(const char *argv)
-{
-    char buffer[PATH_MAX];
-    char path[128];
-    int ret;
-    int fd;
-
-    if (g_module_dirname) {
-        return 0;
-    }
-
-    fd = open(dirname(cmdline_strdup(argv)), O_RDONLY | O_NOCTTY);
-    if (fd < 0) {
-        return -1;
-    }
-
-    snprintf(path, sizeof(path), "/proc/%d/fd/%d", getpid(), fd);
-    ret = readlink(path, buffer, sizeof(buffer));
-
-    close(fd);
-    if (ret <= 0) {
-        return -1;
-    }
-
-    buffer[ret] = '\0';
-    g_module_dirname = cmdline_strdup(buffer);
-    return 0;
-}
-
-/* Only dirname is retrieved. */
-/* Both dirname and basename is retrieved. */
-/* Never fails. */
-static int cmdline_get_module_path_via_argv(const char *argv)
-{
-    if (!g_module_dirname) {
-        g_module_dirname = cmdline_strdup(dirname(cmdline_strdup(argv)));
-    }
-
-    if (!g_module_basename) {
-        g_module_basename = cmdline_strdup(basename(cmdline_strdup(argv)));
-    }
-
-    return 0;
-}
-
-static int cmdline_get_module_path(const char *argv)
-{
-    char buffer[PATH_MAX];
-
-    cmdline_get_module_path_via_exe();
-    cmdline_get_module_path_via_stat(argv);
-    cmdline_get_module_path_via_fd(argv);
-    cmdline_get_module_path_via_argv(argv);
-
-    if (!g_module_dirname || !g_module_basename) {
-        return -1;
-    }
-
-    snprintf(buffer, sizeof(buffer), "%s/%s", g_module_dirname, g_module_basename);
-    g_module_path = cmdline_strdup(buffer);
-    return 0;
-}
-
-static void cmdline_reserve_prefix(void)
+static void cmdline_reserve_prefix(char *argv0)
 {
     size_t len;
+    char *base;
 
-    assert(g_module_basename);
-
-    len = strlen(g_module_basename);
+    base = basename(cmdline_strdup(argv0));
+    len = strlen(base);
     if (len > sizeof(g_prefix) - 2) {
         len = sizeof(g_prefix) - 2;
     }
 
     g_prefix_length = len + 2;
-    memcpy(g_prefix, g_module_basename, len);
+    memcpy(g_prefix, base, len);
     g_prefix[len++] = ':';
     g_prefix[len++] = ' ';
 }
@@ -284,12 +110,7 @@ char **cmdline_setup(int argc, char *argv[])
     g_max_length = strlen(g_arg_name);
     g_module_arg = cmdline_strdup(argv[0]);
 
-    if (cmdline_get_module_path(g_arg_name)) {
-        return NULL;
-    }
-
-    /* Now g_module_basename should be available. */
-    cmdline_reserve_prefix();
+    cmdline_reserve_prefix(argv[0]);
 
     /* Try to count real ARGV length. */
     argv_size = 1;
@@ -347,7 +168,6 @@ char **cmdline_setup(int argc, char *argv[])
     return argv_duplication;
 }
 
-#if !HAVE_SETPROCTITLE
 int cmdline_set_process_name(const char *fmt, ...)
 {
     int with_prefix;
@@ -405,27 +225,4 @@ int cmdline_set_process_name(const char *fmt, ...)
 
     memset(g_arg_name + off, 0, g_max_length - off);
     return 0;
-}
-#endif /* HAVE_SETPROCTITLE */
-
-#endif /* __unix__ */
-
-const char *cmdline_arg_name()
-{
-    return g_module_arg;
-}
-
-const char *cmdline_module_dirname()
-{
-    return g_module_dirname;
-}
-
-const char *cmdline_module_basename()
-{
-    return g_module_basename;
-}
-
-const char *cmdline_module_path()
-{
-    return g_module_path;
 }

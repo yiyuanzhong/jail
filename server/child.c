@@ -1,10 +1,27 @@
+/* Copyright 2014 yiyuanzhong@gmail.com (Yiyuan Zhong)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <grp.h>
 #include <limits.h>
 #include <pwd.h>
@@ -21,7 +38,6 @@
 #include "cmdline.h"
 #include "config.h"
 #include "environ.h"
-#include "logger.h"
 #include "message.h"
 #include "utility.h"
 
@@ -59,11 +75,13 @@ static int child_drop_privileges(void)
 
 static void child_sigalrm_handler(int signum)
 {
+    (void)signum;
     g_child_sigalrm = 1;
 }
 
 static void child_sigchld_handler(int signum)
 {
+    (void)signum;
     g_child_sigchld = 1;
 }
 
@@ -222,7 +240,7 @@ static char **child_construct_args(struct passwd *pwd, array_t *argv)
     }
 
     sh = child_get_shell(pwd);
-    sh = rindex(sh, '/');
+    sh = strrchr(sh, '/');
     assert(sh);
     ++sh;
 
@@ -266,7 +284,7 @@ static int child_restore_signals(void)
     }
 
     act.sa_handler = SIG_DFL;
-    for (i = 0; i < NSIG; ++i) {
+    for (i = 1; i < NSIG; ++i) {
         if (sigaction(i, &act, NULL)) {
             if (errno != EINVAL) {
                 return -1;
@@ -348,6 +366,68 @@ static void child_exec_child(array_t *argv, array_t *env)
     _exit(EXIT_FAILURE);
 }
 
+/* POSIX way to implement openpty(3). */
+static int child_openpty(int *amaster, int *aslave,
+                         const struct termios *termp,
+                         const struct winsize *winp)
+{
+    int master;
+    int slave;
+    char *pts;
+
+    master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0) {
+        return -1;
+    }
+
+    pts = ptsname(master);
+    if (!pts || unlockpt(master)) {
+        close(master);
+        return -1;
+    }
+
+    slave = open(pts, O_RDWR | O_NOCTTY);
+    if (slave < 0) {
+        close(master);
+        return -1;
+    }
+
+    if (tcsetattr(master, TCSANOW, termp)   ||
+        ioctl(slave, TIOCSWINSZ, winp)      ){
+
+        close(slave);
+        close(master);
+        return -1;
+    }
+
+    *amaster = master;
+    *aslave = slave;
+    return 0;
+}
+
+/* POSIX way to implement login_tty(3). */
+static int child_login_tty(int aslave)
+{
+    if (setsid() < 0                        ||
+        ioctl(aslave, TIOCSCTTY, aslave)    ||
+        dup2(aslave, STDIN_FILENO) < 0      ||
+        dup2(aslave, STDOUT_FILENO) < 0     ||
+        dup2(aslave, STDERR_FILENO) < 0     ){
+
+        return -1;
+    }
+
+    if (aslave != STDIN_FILENO  &&
+        aslave != STDOUT_FILENO &&
+        aslave != STDERR_FILENO &&
+        close(aslave)           ){
+
+        return -1;
+    }
+
+    return 0;
+}
+
 static pid_t child_fork_pty(const struct termios *termp,
                             const struct winsize *winp,
                             array_t *argv,
@@ -359,11 +439,27 @@ static pid_t child_fork_pty(const struct termios *termp,
 
     g_child_pty = 1;
 
-    if (openpty(&amaster, &aslave, NULL, termp, winp)) {
+    if (child_openpty(&amaster, &aslave, termp, winp)) {
         return -1;
     }
 
-    if (fchown(aslave, g_args_uid, -1)) {
+    /*
+     * grantpt(3) should be called as an unprivileged process, but it turns
+     * out to do some privileged operations like chown(2) the slave side of
+     * the pesudoterminal. In order to do that it executes a SUID helper
+     * binary `pt_chown`, however the exact location of the binary varies
+     * accross different distros. Once chroot(2)ed, the libc might not be
+     * able to find the binary.
+     *
+     * grantpt(3) changes group of the pesudoterminal to a unspecified value,
+     * typically `tty` with GID=5. Since group name and/or GID might vary
+     * between inside and outside, it's inproper to read the group database.
+     *
+     * Here I hardcode the GID as 5.
+     */
+    if (fchown(aslave, g_args_uid, 5)               ||
+        fchmod(aslave, S_IRUSR | S_IWUSR | S_IWGRP) ){
+
         close(amaster);
         close(aslave);
         return -1;
@@ -382,7 +478,7 @@ static pid_t child_fork_pty(const struct termios *termp,
     } else if (pid == 0) {
         close(amaster);
         close(g_child_remote);
-        if (login_tty(aslave)) {
+        if (child_login_tty(aslave)) {
             _exit(EXIT_FAILURE);
         }
 

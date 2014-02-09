@@ -1,3 +1,18 @@
+/* Copyright 2014 yiyuanzhong@gmail.com (Yiyuan Zhong)
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 #include <sys/mount.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -46,11 +61,13 @@ static int g_server_daemon;
 
 static void server_sigchld_handler(int signum)
 {
+    (void)signum;
     g_server_sigchld = 1;
 }
 
 static void server_sigterm_handler(int signum)
 {
+    (void)signum;
     g_server_sigterm = 1;
 }
 
@@ -131,7 +148,7 @@ static int server_initialize_signals_second(void)
 static int server_start(const char *path)
 {
     struct sockaddr_un addr;
-    socklen_t len;
+    int len;
     int s;
 
     memset(&addr, 0, sizeof(addr));
@@ -139,7 +156,7 @@ static int server_start(const char *path)
     len = snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", path);
     if (len < 0) {
         return -1;
-    } else if (len >= sizeof(addr.sun_path)) {
+    } else if ((size_t)len >= sizeof(addr.sun_path)) {
         len = sizeof(struct sockaddr_un) - 1;
     } else {
         len += offsetof(struct sockaddr_un, sun_path);
@@ -150,8 +167,8 @@ static int server_start(const char *path)
         return -1;
     }
 
-    if (set_non_blocking_mode(s)                ||
-        bind(s, (struct sockaddr *)&addr, len)  ){
+    if (set_non_blocking_mode(s)                            ||
+        bind(s, (struct sockaddr *)&addr, (socklen_t)len)   ){
 
         close(s);
         return -1;
@@ -348,7 +365,7 @@ static int server_bind_mount(char *entry)
 
     if (g_args_root) {
         ret = snprintf(buffer, sizeof(buffer), "%s/%s", g_args_root, jpath);
-        if (ret < 0 || ret >= sizeof(buffer)) {
+        if (ret < 0 || (size_t)ret >= sizeof(buffer)) {
             return -1;
         }
 
