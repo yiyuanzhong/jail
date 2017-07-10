@@ -494,6 +494,9 @@ static pid_t server_fork_clone(context_t *context)
         return -1;
     }
 
+    /* We uses CLONE_NEWNS, we do our responsibilities. */
+    mount("none", "/", "/", MS_BIND | MS_REC | MS_PRIVATE, NULL);
+
     return pid;
 }
 
